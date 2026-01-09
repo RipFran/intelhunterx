@@ -181,3 +181,13 @@ The root `results/findings` folder contains the merged, deduplicated, alphabetic
 - `0`: Success
 - `1`: Completed with one or more domain failures
 - `2`: Invalid CLI usage or missing required flags
+
+## Screenshots
+
+### Console output
+
+![Console output](media/consoleoutput.png)
+
+### Results example
+
+![Results example](media/results.png)
