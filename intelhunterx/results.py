@@ -201,7 +201,10 @@ class CategorySink:
                 self._locks[category] = threading.Lock()
             return self._locks[category]
 
-    def write_unique(self, finding: Finding) -> None:
+    def write_unique(self, finding: Finding, meta=None) -> None:
+        if finding.category == "credentials":
+            self._write_credential(finding, meta)
+            return
         lock = self._lock_for(finding.category)
         path = self.findings_dir / f"{finding.category}.jsonl"
         rec = {
@@ -216,3 +219,50 @@ class CategorySink:
         with lock:
             with open(path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+    def _write_credential(self, finding: Finding, meta=None) -> None:
+        context = finding.context or {}
+        username = str(context.get("username", "")).strip()
+        password = str(context.get("password", "")).strip()
+        if (not username or not password) and ":" in finding.value:
+            user_part, pass_part = finding.value.split(":", 1)
+            username = username or user_part
+            password = password or pass_part
+
+        email_domain = context.get("email_domain")
+        context_domains = self._normalize_context_list(context.get("context_domains"))
+        context_urls = self._normalize_context_list(context.get("context_urls"))
+
+        source_meta = None
+        if meta is not None and hasattr(meta, "to_dict"):
+            try:
+                source_meta = meta.to_dict()
+            except Exception:
+                source_meta = None
+
+        rec = {
+            "category": "credentials",
+            "value": finding.value,
+            "username": username,
+            "password": password,
+            "email_domain": email_domain if isinstance(email_domain, str) else None,
+            "context_domains": context_domains,
+            "context_urls": context_urls,
+            "source": finding.occurrence.source,
+            "line_no": finding.occurrence.line_no,
+            "snippet": finding.occurrence.snippet,
+            "source_meta": source_meta,
+        }
+        lock = self._lock_for("credentials")
+        path = self.findings_dir / "credentials.jsonl"
+        with lock:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+    @staticmethod
+    def _normalize_context_list(value) -> List[str]:
+        if not value:
+            return []
+        if isinstance(value, (list, tuple, set)):
+            return sorted(str(item) for item in value if item is not None)
+        return [str(value)]

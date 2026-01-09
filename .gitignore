@@ -29,3 +29,6 @@ intelx_exports/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Exectution files
+selectors.txt

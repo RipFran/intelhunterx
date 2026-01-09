@@ -36,9 +36,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         description="Download IntelX exports for domains, unzip them, and scan for secrets/artifacts.",
     )
     ap.add_argument(
-        "--input",
+        "--query",
         required=True,
-        help="Input domain or a file containing one domain per line.",
+        help="IntelX search domain (download scope) or a file containing one domain per line.",
     )
     ap.add_argument(
         "--output-dir",
@@ -63,9 +63,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Reuse existing ZIP exports if they already exist (avoids extra API calls)",
     )
     ap.add_argument(
-        "--selector-only",
-        action="store_true",
-        help="Use full domains as selectors and only scan matching lines (reduces noise).",
+        "--selector",
+        action="append",
+        required=True,
+        help="Selector(s) to search for (repeat or provide a file with one selector per line).",
+    )
+    ap.add_argument(
+        "--extract",
+        choices=("credentials", "emails", "surface"),
+        help="Limit extraction to: credentials, emails, or surface (endpoints/hostnames/assets).",
     )
     ap.add_argument(
         "--downloads-dir",
@@ -137,6 +143,47 @@ def _collect_domains(raw_domains: Iterable[str], logger: RichLogger, normalize_d
         seen.add(dom)
         domains.append(dom)
     return domains
+
+
+def _collect_selectors(raw_selectors: Iterable[str]) -> List[str]:
+    selectors: List[str] = []
+    seen: set[str] = set()
+    for raw in raw_selectors:
+        value = raw.strip()
+        if not value:
+            continue
+        key = value.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        selectors.append(value)
+    return selectors
+
+
+def _read_selector_inputs(
+    values: Iterable[str],
+    read_list_file,
+) -> tuple[List[str], List[Path]]:
+    raw_selectors: List[str] = []
+    selector_files: List[Path] = []
+    for raw in values:
+        if not raw:
+            continue
+        value = raw.strip()
+        if not value:
+            continue
+        path = Path(value).expanduser()
+        if path.exists():
+            if path.is_dir():
+                raise ValueError(f"--selector path is a directory, expected file or selector: {path}")
+            try:
+                raw_selectors.extend(read_list_file(path))
+            except Exception as exc:
+                raise ValueError(f"Failed to read selector file {path}: {exc}") from exc
+            selector_files.append(path.resolve())
+        else:
+            raw_selectors.append(value)
+    return raw_selectors, selector_files
 
 
 def _scan_items(
@@ -218,27 +265,39 @@ def main() -> int:
 
     raw_domains: List[str] = []
     domains_file_path = None
-    input_value = args.input.strip()
-    if not input_value:
-        logger.error("Missing --input value.")
+    query_value = args.query.strip()
+    if not query_value:
+        logger.error("Missing --query value.")
         return 2
-    input_path = Path(input_value).expanduser()
-    if input_path.exists():
-        if input_path.is_dir():
-            logger.error(f"--input path is a directory, expected file or domain: {input_path}")
+    query_path = Path(query_value).expanduser()
+    if query_path.exists():
+        if query_path.is_dir():
+            logger.error(f"--query path is a directory, expected file or domain: {query_path}")
             return 2
-        domains_file_path = input_path.resolve()
+        domains_file_path = query_path.resolve()
         try:
             raw_domains.extend(read_domains_file(domains_file_path))
         except Exception as exc:
             logger.error(f"Failed to read domains file {domains_file_path}: {exc}")
             return 2
     else:
-        raw_domains.append(input_value)
+        raw_domains.append(query_value)
 
     domains = _collect_domains(raw_domains, logger, normalize_domain)
     if not domains:
         logger.error("No valid domains to process.")
+        return 2
+
+    selector_files: List[Path] = []
+    selector_source = "explicit"
+    try:
+        raw_selectors, selector_files = _read_selector_inputs(args.selector, read_domains_file)
+    except ValueError as exc:
+        logger.error(str(exc))
+        return 2
+    selectors = _collect_selectors(raw_selectors)
+    if not selectors:
+        logger.error("No valid selectors to process.")
         return 2
 
     base_out = Path(args.output_dir).expanduser().resolve()
@@ -247,7 +306,6 @@ def main() -> int:
         if args.downloads_dir
         else base_out / "intelx_exports"
     )
-    downloads_root.mkdir(parents=True, exist_ok=True)
 
     batch_stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     base_url = args.base_url
@@ -263,30 +321,33 @@ def main() -> int:
     global_inputs: List[str] = []
     per_domain_outputs: List[str] = []
     global_started = dt.datetime.now().isoformat(timespec="seconds")
-    selector_ctx = build_selector_contexts(domains, selector_only=args.selector_only)
-    if args.selector_only:
-        logger.info(f"Selectors (domain mode): {', '.join(domains)}")
-    else:
-        logger.info(f"Selectors (keyword mode): {', '.join(selector_ctx.keywords)}")
+    selector_ctx = build_selector_contexts(selectors, selector_only=True)
+    extract_mode = args.extract
+    include_emails = extract_mode in (None, "emails")
+    include_credentials = extract_mode in (None, "credentials")
+    include_surface = extract_mode in (None, "surface")
+    logger.info(f"Selectors ({selector_source}): {', '.join(selectors)}")
+    if selector_files:
+        logger.info("Selector files: " + ", ".join(str(p) for p in selector_files))
+    if extract_mode:
+        logger.info(f"Extraction focus: {extract_mode}")
+    if args.offline:
+        logger.info("Offline mode: only existing ZIPs will be processed.")
+    elif args.reuse_downloads:
+        logger.info("Reuse mode: existing ZIPs will be reused when available.")
+
+    domain_batches: Dict[str, List[ExportBatch]] = {}
 
     for domain in domains:
-        logger.info(f"Domain: {domain}")
-        run_started = dt.datetime.now().isoformat(timespec="seconds")
-
-        out_dir = build_output_dir(base_out, domain, batch_stamp)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / "findings").mkdir(parents=True, exist_ok=True)
-
+        logger.info(f"Preparing exports for {domain}")
         safe_domain = sanitize_for_fs(domain)
-        download_dir = downloads_root / f"{safe_domain}_{batch_stamp}" if not args.offline else downloads_root
-        download_dir.mkdir(parents=True, exist_ok=True)
 
-        existing_zips = list(downloads_root.rglob(f"{safe_domain}*.zip"))
+        existing_zips: List[Path] = []
+        if downloads_root.exists():
+            existing_zips = list(downloads_root.rglob(f"{safe_domain}*.zip"))
+
         batches: List[ExportBatch] = []
-
         if args.offline or (args.reuse_downloads and existing_zips):
-            if args.offline:
-                logger.info("Offline mode: only existing ZIPs will be processed.")
             if not existing_zips:
                 logger.error(f"No ZIP exports found for {domain} under {downloads_root}")
                 failures += 1
@@ -308,6 +369,8 @@ def main() -> int:
                 logger.error("Missing IntelX API key. Use --api-key or set INTELX_API_KEY.")
                 failures += 1
                 continue
+            download_dir = downloads_root / f"{safe_domain}_{batch_stamp}"
+            download_dir.mkdir(parents=True, exist_ok=True)
             try:
                 batches = plan_export_batches(
                     client,
@@ -330,6 +393,19 @@ def main() -> int:
             failures += 1
             continue
 
+        domain_batches[domain] = batches
+
+    for domain in domains:
+        batches = domain_batches.get(domain)
+        if not batches:
+            continue
+        logger.info(f"Scanning exports for {domain}")
+        run_started = dt.datetime.now().isoformat(timespec="seconds")
+
+        out_dir = build_output_dir(base_out, domain, batch_stamp)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "findings").mkdir(parents=True, exist_ok=True)
+
         store = ResultStore()
         sink = CategorySink(out_dir / "findings")
         scanner = Scanner(
@@ -337,7 +413,10 @@ def main() -> int:
             store=store,
             sink=sink,
             logger=logger,
-            selector_filter=args.selector_only,
+            selector_filter=False,
+            include_emails=include_emails,
+            include_surface=include_surface,
+            include_credentials=include_credentials,
             extra_stores=[global_store],
             relevance_window=DEFAULT_RELEVANCE_WINDOW,
             max_line_len=DEFAULT_MAX_LINE_LEN,
@@ -346,10 +425,6 @@ def main() -> int:
 
         logger.info(f"Output : {out_dir}")
         logger.info(f"Threads: {args.threads}")
-        if args.selector_only:
-            logger.info("Line filtering: selector-only")
-        else:
-            logger.info("Line filtering: disabled (scan all lines)")
 
         all_items = []
         export_summaries = []
@@ -397,13 +472,15 @@ def main() -> int:
 
         run_metadata: Dict[str, object] = {
             "domain": domain,
-            "selector": domain,
-            "selectors": domains,
-            "selector_mode": "domain" if args.selector_only else "keyword",
+            "selector": selectors[0] if selectors else None,
+            "selectors": selectors,
+            "selector_source": selector_source,
+            "selector_mode": "literal",
             "input": [str(e["extract_dir"]) for e in export_summaries],
             "output": str(out_dir),
             "downloads_dir": str(downloads_root),
             "domains_file": str(domains_file_path) if domains_file_path else None,
+            "selectors_file": [str(p) for p in selector_files] if selector_files else None,
             "batch": batch_stamp,
             "started_at": run_started,
             "settings": {
@@ -411,6 +488,7 @@ def main() -> int:
                 "max_line_len": scanner.max_line_len,
                 "max_file_mb": round(scanner.max_file_bytes / (1024 * 1024), 2),
                 "threads": args.threads,
+                "extract": extract_mode or "all",
                 "intelx_max_results": max(1, args.max_results),
                 "intelx_export_limit": args.export_limit or args.max_results,
                 "intelx_base_url": base_url,
@@ -419,7 +497,7 @@ def main() -> int:
                 "max_segments": args.max_segments,
                 "offline": args.offline,
                 "reuse_downloads": args.reuse_downloads,
-                "selector_only": args.selector_only,
+                "selector_filter": False,
             },
             "intelx": {
                 "searches": export_summaries,
@@ -450,37 +528,41 @@ def main() -> int:
         if global_store.records or global_store.credentials:
             global_metadata: Dict[str, object] = {
                 "domains": domains,
-            "selectors": domains,
-            "selector_mode": "domain" if args.selector_only else "keyword",
-            "input": sorted(set(global_inputs)),
-            "output": str(base_out),
-            "downloads_dir": str(downloads_root),
-            "domains_file": str(domains_file_path) if domains_file_path else None,
-            "batch": batch_stamp,
-            "started_at": global_started,
-            "finished_at": dt.datetime.now().isoformat(timespec="seconds"),
-            "settings": {
-                "relevance_window": DEFAULT_RELEVANCE_WINDOW,
-                "max_line_len": DEFAULT_MAX_LINE_LEN,
-                "max_file_mb": DEFAULT_MAX_FILE_MB,
-                "threads": args.threads,
-                "intelx_max_results": max(1, args.max_results),
-                "intelx_export_limit": args.export_limit or args.max_results,
-                "intelx_base_url": base_url,
-                "intelx_user_agent": args.user_agent,
-                "segment_days": max(0, args.segment_days),
-                "max_segments": args.max_segments,
-                "offline": args.offline,
-                "reuse_downloads": args.reuse_downloads,
-                "selector_only": args.selector_only,
-            },
-            "intelx": {
-                "searches": global_export_summaries,
-            },
-            "per_domain_outputs": per_domain_outputs,
-            "scan_stats": global_scan_stats,
-        }
-        global_writer = ResultWriter(base_out, logger)
-        global_writer.write_all(global_store, global_metadata)
+                "selector": selectors[0] if selectors else None,
+                "selectors": selectors,
+                "selector_source": selector_source,
+                "selector_mode": "literal",
+                "input": sorted(set(global_inputs)),
+                "output": str(base_out),
+                "downloads_dir": str(downloads_root),
+                "domains_file": str(domains_file_path) if domains_file_path else None,
+                "selectors_file": [str(p) for p in selector_files] if selector_files else None,
+                "batch": batch_stamp,
+                "started_at": global_started,
+                "finished_at": dt.datetime.now().isoformat(timespec="seconds"),
+                "settings": {
+                    "relevance_window": DEFAULT_RELEVANCE_WINDOW,
+                    "max_line_len": DEFAULT_MAX_LINE_LEN,
+                    "max_file_mb": DEFAULT_MAX_FILE_MB,
+                    "threads": args.threads,
+                    "extract": extract_mode or "all",
+                    "intelx_max_results": max(1, args.max_results),
+                    "intelx_export_limit": args.export_limit or args.max_results,
+                    "intelx_base_url": base_url,
+                    "intelx_user_agent": args.user_agent,
+                    "segment_days": max(0, args.segment_days),
+                    "max_segments": args.max_segments,
+                    "offline": args.offline,
+                    "reuse_downloads": args.reuse_downloads,
+                    "selector_filter": False,
+                },
+                "intelx": {
+                    "searches": global_export_summaries,
+                },
+                "per_domain_outputs": per_domain_outputs,
+                "scan_stats": global_scan_stats,
+            }
+            global_writer = ResultWriter(base_out, logger)
+            global_writer.write_all(global_store, global_metadata)
 
     return 1 if failures else 0

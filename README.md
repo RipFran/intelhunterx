@@ -51,15 +51,19 @@ pip install -r requirements.txt
 
 ## Usage
 
-### Single domain (default: maximize findings)
+`--query` and `--selector` are both required to keep download scope and analysis selectors separate.
+
+### Single domain
 
 ```bash
-python intelhunterx.py --api-key YOUR_INTELX_KEY --input example.com
+python intelhunterx.py --api-key YOUR_INTELX_KEY --query example.com --selector example
 ```
+
+This downloads IntelX exports for `example.com`, then scans those documents and keeps artifacts that match the selector `example` (keyword substring match).
 
 ### Multiple domains from file
 
-Create `domains.txt`:
+Create `queries.txt`:
 
 ```txt
 example.com
@@ -68,46 +72,63 @@ example.org
 sub.example.net
 ```
 
+Create `selectors.txt`:
+
+```txt
+example
+test
+```
+
 Run:
 
 ```bash
-python intelhunterx.py --api-key YOUR_INTELX_KEY --input domains.txt
+python intelhunterx.py --api-key YOUR_INTELX_KEY --query queries.txt --selector selectors.txt
 ```
 
-### Offline mode (use existing ZIPs)
+This downloads exports for every domain listed in `queries.txt`, then scans those documents and keeps artifacts that match any selector from `selectors.txt`.
+
+### Offline mode (use existing downloads)
 
 ```bash
-python intelhunterx.py --offline --downloads-dir ./intelx_exports --input example.com
+python intelhunterx.py --api-key YOUR_INTELX_KEY --offline --output-dir results/example --query queries.txt --selector example
 ```
 
-### Reduce noise (only lines matching selector)
+This scans existing downloads under `results/example/intelx_exports` for the queries in `queries.txt` and keeps artifacts that match `example`. Any query without existing downloads is reported as a failure and skipped.
+
+### Mixed mode (use existing downloads and make queries)
 
 ```bash
-python intelhunterx.py --api-key YOUR_INTELX_KEY --input example.com --selector-only
+python intelhunterx.py --api-key YOUR_INTELX_KEY --reuse-downloads --output-dir results/example --query queries.txt --selector example
 ```
+
+This reuses existing downloads under `results/example/intelx_exports` when they are present for a query; if none exist for a query, it downloads new exports from IntelX, then scans everything and keeps artifacts that match `example`.
+
+
+### Focused extraction
+
+```bash
+python intelhunterx.py --api-key YOUR_INTELX_KEY --query example.com --selector example.com --extract emails
+python intelhunterx.py --api-key YOUR_INTELX_KEY --query example.com --selector example.com --extract credentials
+python intelhunterx.py --api-key YOUR_INTELX_KEY --query example.com --selector example.com --extract surface
+```
+
+`surface` extracts endpoints, hostnames, and assets.
 
 ### Environment variable (optional)
 
 ```bash
 export INTELX_API_KEY="YOUR_INTELX_KEY"
-python intelhunterx.py --input example.com
+python intelhunterx.py --query example.com --selector example.com
 ```
-
-## Online vs offline
-
-- Online mode: uses the IntelX Search API to create a search job, polls results, and downloads export ZIPs.
-- Offline mode: skips the API and only scans ZIPs already present under `--downloads-dir`.
-- `--input` is still required in offline mode, because the selectors are used to filter findings.
 
 ## Parsing and extraction
 
 - Each export includes `Info.csv`, which maps file names to bucket, media, content type, and system ID.
 - The scanner uses `Info.csv` metadata to decide how to handle content and extracts printable strings from binaries when needed.
 - Every endpoint contributes its hostname to `hostnames.jsonl` and its root to `assets.jsonl`.
-- When `--input` contains multiple domains, all of them act as selectors during scanning.
-- Selector behavior:
-  - With `--selector-only`: selectors are full domains (e.g., `google.es`).
-  - Without `--selector-only`: selectors are base keywords without TLD (e.g., `google`).
+- Selectors are provided via `--selector`.
+- Domain selectors match subdomains; keyword selectors match substrings; email selectors match the full email.
+- Use `--extract` to limit findings to `credentials`, `emails`, or `surface`.
 
 ## Output structure
 
@@ -149,8 +170,9 @@ The root `results/findings` folder contains the merged, deduplicated, alphabetic
 - Default configuration aims for maximum coverage:
   - `--max-results` defaults to 1000 (ZIP cap).
   - Adaptive segmentation is enabled by default.
-  - `--selector-only` is disabled, so all lines are scanned.
+  - All lines are scanned by default; selectors are literal unless you pass keywords.
   - `--max-segments 0` means unlimited segmentation until IntelX reports no more results.
+- Execution runs in two phases: download all exports first, then scan.
 - IntelX export limits: 1000 files per ZIP, 2 GB uncompressed, 20 MB per file.
 - The tool rate limits requests to 1 req/s by default to match IntelX guidance.
 
@@ -158,4 +180,4 @@ The root `results/findings` folder contains the merged, deduplicated, alphabetic
 
 - `0`: Success
 - `1`: Completed with one or more domain failures
-- `2`: Invalid CLI usage or missing inputs
+- `2`: Invalid CLI usage or missing required flags

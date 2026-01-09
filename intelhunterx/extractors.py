@@ -54,6 +54,10 @@ URL_CRED_TAIL_RX = re.compile(
     rf"^\s*{CRED_SEP_PATTERN}\s*(?P<user>{CRED_USER_PATTERN})\s*{CRED_SEP_PATTERN}\s*(?P<pwd>{CRED_PASS_PATTERN})(?:\s*{CRED_SEP_PATTERN}\s*.*)?$",
     re.IGNORECASE,
 )
+URL_CRED_TAIL_INLINE_RX = re.compile(
+    rf"{CRED_SEP_PATTERN}\s*(?P<user>{CRED_USER_PATTERN})\s*{CRED_SEP_PATTERN}\s*(?P<pwd>{CRED_PASS_PATTERN})(?:\s*{CRED_SEP_PATTERN}\s*.*)?$",
+    re.IGNORECASE,
+)
 URL_CRED_SPACE_TAIL_RX = re.compile(
     rf"^\s+(?P<user>{CRED_USER_PATTERN})\s*{CRED_SEP_PATTERN}\s*(?P<pwd>{CRED_PASS_PATTERN})(?:\s*{CRED_SEP_PATTERN}\s*.*)?$",
     re.IGNORECASE,
@@ -543,10 +547,20 @@ def should_accept_credential(
     return has_keywords or has_context
 
 
-def extract_from_text(line: str, source: str, line_no: int, selector_ctx: SelectorContext) -> List[Finding]:
+def extract_from_text(
+    line: str,
+    source: str,
+    line_no: int,
+    selector_ctx: SelectorContext,
+    include_emails: bool = True,
+    include_surface: bool = True,
+    include_credentials: bool = True,
+) -> List[Finding]:
     findings: List[Finding] = []
     raw = line.strip()
     if not raw:
+        return findings
+    if not (include_emails or include_surface or include_credentials):
         return findings
 
     cleaned = strip_html_tags(raw)
@@ -555,35 +569,46 @@ def extract_from_text(line: str, source: str, line_no: int, selector_ctx: Select
     line_strip = refanged.strip()
     url_entries: List[tuple[str, ParsedUrl, int, int]] = []
 
-    for m in EMAIL_RX.finditer(refanged):
-        email = normalize_email(m.group(1))
-        if selector_allows_email(email, selector_ctx):
-            findings.append(Finding("emails", email, occ))
+    if include_emails:
+        for m in EMAIL_RX.finditer(refanged):
+            email = normalize_email(m.group(1))
+            if selector_allows_email(email, selector_ctx):
+                findings.append(Finding("emails", email, occ))
 
-    for candidate, start, end in iter_url_candidates(refanged):
-        parsed_info = parse_url_candidate_loose(candidate)
-        if not parsed_info:
-            continue
-        parsed, trimmed_len = parsed_info
-        adjusted_end = start + trimmed_len
-        url_entries.append((candidate, parsed, start, adjusted_end))
-        url_value = build_url(parsed)
-        if selector_allows_host(parsed.host, selector_ctx):
-            findings.append(Finding("hostnames", normalize_host(parsed.host), occ))
-            findings.append(Finding("endpoints", url_value, occ))
-            asset_port = parsed.port if parsed.port is not None else DEFAULT_PORTS.get(parsed.scheme)
-            if is_valid_port(asset_port):
-                asset_value = normalize_asset(parsed.scheme, parsed.host, asset_port)
-                findings.append(Finding("assets", asset_value, occ))
+    if include_surface or include_credentials:
+        for candidate, start, end in iter_url_candidates(refanged):
+            parsed_info = parse_url_candidate_loose(candidate)
+            if not parsed_info:
+                continue
+            parsed, trimmed_len = parsed_info
+            adjusted_end = start + trimmed_len
+            candidate_trimmed = candidate[:trimmed_len]
+            inline_match = URL_CRED_TAIL_INLINE_RX.search(candidate_trimmed)
+            if inline_match:
+                base_candidate = candidate_trimmed[: inline_match.start()]
+                parsed_base = parse_url_candidate(base_candidate)
+                if parsed_base:
+                    parsed = parsed_base
+                adjusted_end = start + inline_match.start()
+            url_entries.append((candidate_trimmed, parsed, start, adjusted_end))
+            if include_surface and selector_allows_host(parsed.host, selector_ctx):
+                url_value = build_context_url(parsed)
+                findings.append(Finding("hostnames", normalize_host(parsed.host), occ))
+                findings.append(Finding("endpoints", url_value, occ))
+                asset_port = parsed.port if parsed.port is not None else DEFAULT_PORTS.get(parsed.scheme)
+                if is_valid_port(asset_port):
+                    asset_value = normalize_asset(parsed.scheme, parsed.host, asset_port)
+                    findings.append(Finding("assets", asset_value, occ))
 
-    for m in HOST_RX.finditer(refanged):
-        host = normalize_host(m.group(1))
-        if not is_valid_domain(host):
-            continue
-        if selector_allows_host(host, selector_ctx):
-            findings.append(Finding("hostnames", host, occ))
+    if include_surface:
+        for m in HOST_RX.finditer(refanged):
+            host = normalize_host(m.group(1))
+            if not is_valid_domain(host):
+                continue
+            if selector_allows_host(host, selector_ctx):
+                findings.append(Finding("hostnames", host, occ))
 
-    if not looks_like_cookie_line(line_strip):
+    if include_credentials and not looks_like_cookie_line(line_strip):
         has_keywords = CRED_KEYWORDS_RX.search(line_strip) is not None
 
         for _, parsed, _, end in url_entries:
@@ -622,7 +647,7 @@ def extract_from_text(line: str, source: str, line_no: int, selector_ctx: Select
                             },
                         )
             )
-            tail = line_strip[end:]
+            tail = refanged[end:]
             m = URL_CRED_TAIL_RX.match(tail)
             if not m:
                 m = URL_CRED_SPACE_TAIL_RX.match(tail)

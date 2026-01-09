@@ -20,6 +20,9 @@ class Scanner:
         sink: CategorySink,
         logger: RichLogger,
         selector_filter: bool = False,
+        include_emails: bool = True,
+        include_surface: bool = True,
+        include_credentials: bool = True,
         extra_stores: List[ResultStore] | None = None,
         relevance_window: int = 0,
         max_line_len: int = 200000,
@@ -31,6 +34,9 @@ class Scanner:
         self.sink = sink
         self.logger = logger
         self.selector_filter = selector_filter
+        self.include_emails = include_emails
+        self.include_surface = include_surface
+        self.include_credentials = include_credentials
         self.extra_stores = extra_stores or []
         self.relevance_window = max(0, relevance_window)
         self.max_line_len = max(1024, max_line_len)
@@ -38,17 +44,26 @@ class Scanner:
 
     def _process_relevant_line(self, line: str, source: str, line_no: int, meta) -> int:
         new_count = 0
-        for f in extract_from_text(line, source, line_no, self.selector_ctx):
+        for f in extract_from_text(
+            line,
+            source,
+            line_no,
+            self.selector_ctx,
+            include_emails=self.include_emails,
+            include_surface=self.include_surface,
+            include_credentials=self.include_credentials,
+        ):
             if f.category == "credentials":
                 for extra_store in self.extra_stores:
                     extra_store.add_credential(f, meta=meta)
                 if self.store.add_credential(f, meta=meta):
+                    self.sink.write_unique(f, meta=meta)
                     new_count += 1
                 continue
             for extra_store in self.extra_stores:
                 extra_store.add(f, meta=meta)
             if self.store.add(f, meta=meta):
-                self.sink.write_unique(f)
+                self.sink.write_unique(f, meta=meta)
                 new_count += 1
         return new_count
 
