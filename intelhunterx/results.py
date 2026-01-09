@@ -126,10 +126,17 @@ class ResultStore:
 
 
 class ResultWriter:
-    def __init__(self, out_dir: Path, logger: RichLogger):
+    def __init__(
+        self,
+        out_dir: Path,
+        logger: RichLogger,
+        findings_dir: Path | None = None,
+        metadata_dir: Path | None = None,
+    ):
         self.out_dir = out_dir
         self.logger = logger
-        self.findings_dir = out_dir / "findings"
+        self.findings_dir = findings_dir or (out_dir / "findings")
+        self.metadata_dir = metadata_dir or out_dir
         self.findings_dir.mkdir(parents=True, exist_ok=True)
 
     def write_all(self, store: ResultStore, run_metadata: Dict[str, object]) -> None:
@@ -157,13 +164,13 @@ class ResultWriter:
         # Always write credentials after other categories
         self._write_credentials(store)
 
-        with open(self.out_dir / "summary.json", "w", encoding="utf-8") as f:
+        with open(self.metadata_dir / "summary.json", "w", encoding="utf-8") as f:
             json.dump(store.summary(), f, indent=2)
 
-        with open(self.out_dir / "run_metadata.json", "w", encoding="utf-8") as f:
+        with open(self.metadata_dir / "run_metadata.json", "w", encoding="utf-8") as f:
             json.dump(run_metadata, f, indent=2)
 
-        self.logger.done(f"Results written to: {self.out_dir}")
+        self.logger.done(f"Results written to: {self.metadata_dir}")
 
     def _write_credentials(self, store: ResultStore) -> None:
         if not store.credentials:
@@ -194,6 +201,7 @@ class CategorySink:
         self.findings_dir = findings_dir
         self._locks: Dict[str, threading.Lock] = {}
         self._global_lock = threading.Lock()
+        self.findings_dir.mkdir(parents=True, exist_ok=True)
 
     def _lock_for(self, category: str) -> threading.Lock:
         with self._global_lock:
@@ -266,3 +274,70 @@ class CategorySink:
         if isinstance(value, (list, tuple, set)):
             return sorted(str(item) for item in value if item is not None)
         return [str(value)]
+
+
+def load_findings(findings_dir: Path, store: ResultStore, logger: RichLogger) -> int:
+    if not findings_dir.exists():
+        return 0
+
+    loaded = 0
+
+    def _meta_from_source(source_meta):
+        if source_meta is None:
+            return None
+
+        class _Meta:
+            def __init__(self, payload: dict):
+                self._payload = payload
+
+            def to_dict(self) -> dict:
+                return self._payload
+
+        if isinstance(source_meta, dict):
+            return _Meta(source_meta)
+        return None
+
+    for path in sorted(findings_dir.glob("*.jsonl")):
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    raw = line.strip()
+                    if not raw:
+                        continue
+                    try:
+                        data = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    category = str(data.get("category") or path.stem)
+                    value = str(data.get("value") or "")
+                    if not category or not value:
+                        continue
+                    occurrence = Occurrence(
+                        source=str(data.get("source") or ""),
+                        line_no=int(data.get("line_no") or 0),
+                        snippet=str(data.get("snippet") or ""),
+                    )
+                    context = data.get("context") if isinstance(data.get("context"), dict) else None
+                    if category == "credentials":
+                        context = context or {}
+                        context.update(
+                            {
+                                "username": data.get("username"),
+                                "password": data.get("password"),
+                                "email_domain": data.get("email_domain"),
+                                "context_domains": data.get("context_domains"),
+                                "context_urls": data.get("context_urls"),
+                            }
+                        )
+                        finding = Finding(category, value, occurrence, context=context)
+                        meta = _meta_from_source(data.get("source_meta"))
+                        store.add_credential(finding, meta=meta)
+                        loaded += 1
+                        continue
+                    finding = Finding(category, value, occurrence, context=context)
+                    store.add(finding)
+                    loaded += 1
+        except Exception as exc:
+            logger.warn(f"Failed to load findings from {path}: {exc}")
+
+    return loaded

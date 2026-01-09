@@ -3,7 +3,8 @@ from __future__ import annotations
 import re
 
 DOMAIN_LABEL = r"[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?"
-TLD_LABEL = r"(?:[A-Z]{2,63}|XN--[A-Z0-9-]{2,59})"
+FILE_EXT_TLD_BLACKLIST = r"(?:JPE?G|PNG|GIF|BMP|WEBP|SVG|ICO|PDF|DOCX?|XLSX?|PPTX?|TXT|CSV|TSV|LOG|SQL|JSON|XML|YAML|YML|HTML?|CSS|JS)"
+TLD_LABEL = rf"(?:(?!{FILE_EXT_TLD_BLACKLIST}\b)(?:[A-Z]{{2,63}}|XN--[A-Z0-9-]{{2,59}}))"
 DOMAIN_PATTERN = rf"(?:{DOMAIN_LABEL}\.)+{TLD_LABEL}"
 EMAIL_BODY_PATTERN = rf"[A-Z0-9._%+\-]{{1,64}}@{DOMAIN_PATTERN}"
 

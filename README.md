@@ -25,7 +25,7 @@ Python CLI tool to download IntelX Search exports and extract secrets/artifacts 
 
 ## Why this exists
 
-IntelX Search is designed to return items for a selector term (commonly a domain). The recommended flow is:
+IntelX Search is designed to return items for a query term (domain, url, email and more...). The recommended flow is:
 
 1. Start a search job: `POST /intelligent/search`
 2. Poll results: `GET /intelligent/search/result` until completion
@@ -51,65 +51,72 @@ pip install -r requirements.txt
 
 ## Usage
 
-`--query` and `--selector` are both required to keep download scope and analysis selectors separate.
+IntelHunterX runs in two separate commands:
 
-### Single domain
+1. `download`: fetch IntelX exports into a database folder.
+2. `search`: scan the downloaded documents later.
+
+`search` requires at least one `--selector` (repeat the flag or provide a file with one selector per line).
+`download --query` accepts any IntelX query (domains, emails, URLs, wildcards, etc).
+
+### Create a database and download a query
 
 ```bash
-python intelhunterx.py --api-key YOUR_INTELX_KEY --query example.com --selector example
+python intelhunterx.py download --db dbs/acme --api-key YOUR_INTELX_KEY --query example.com
 ```
 
-This downloads IntelX exports for `example.com`, then scans those documents and keeps artifacts that match the selector `example` (keyword substring match).
+This creates `dbs/acme` (if needed) and stores the extracted documents under a single folder for the query.
 
-### Multiple domains from file
+You can also use wildcard queries:
+
+```bash
+python intelhunterx.py download --db dbs/acme --api-key YOUR_INTELX_KEY --query "*.example.com"
+```
+
+### Download multiple queries from a file
 
 Create `queries.txt`:
 
 ```txt
 example.com
-example.org
+*.example.org
 # comments are allowed
 sub.example.net
-```
-
-Create `selectors.txt`:
-
-```txt
-example
-test
+hello@acme.org
+https://portal.example.net/login
 ```
 
 Run:
 
 ```bash
-python intelhunterx.py --api-key YOUR_INTELX_KEY --query queries.txt --selector selectors.txt
+python intelhunterx.py download --db dbs/acme --api-key YOUR_INTELX_KEY --query queries.txt
 ```
 
-This downloads exports for every domain listed in `queries.txt`, then scans those documents and keeps artifacts that match any selector from `selectors.txt`.
-
-### Offline mode (use existing downloads)
+### Update a query (replace its documents)
 
 ```bash
-python intelhunterx.py --api-key YOUR_INTELX_KEY --offline --output-dir results/example --query queries.txt --selector example
+python intelhunterx.py download --db dbs/acme --api-key YOUR_INTELX_KEY --query example.com --update
 ```
 
-This scans existing downloads under `results/example/intelx_exports` for the queries in `queries.txt` and keeps artifacts that match `example`. Any query without existing downloads is reported as a failure and skipped.
-
-### Mixed mode (use existing downloads and make queries)
+### Search across the database
 
 ```bash
-python intelhunterx.py --api-key YOUR_INTELX_KEY --reuse-downloads --output-dir results/example --query queries.txt --selector example
+python intelhunterx.py search --db dbs/acme --selector example
 ```
 
-This reuses existing downloads under `results/example/intelx_exports` when they are present for a query; if none exist for a query, it downloads new exports from IntelX, then scans everything and keeps artifacts that match `example`.
+### Search within specific queries
 
+```bash
+python intelhunterx.py search --db dbs/acme --selector example.com --query b.com
+python intelhunterx.py search --db dbs/acme --selector example --query queries.txt
+```
 
 ### Focused extraction
 
 ```bash
-python intelhunterx.py --api-key YOUR_INTELX_KEY --query example.com --selector example.com --extract emails
-python intelhunterx.py --api-key YOUR_INTELX_KEY --query example.com --selector example.com --extract credentials
-python intelhunterx.py --api-key YOUR_INTELX_KEY --query example.com --selector example.com --extract surface
+python intelhunterx.py search --db dbs/acme --selector example.com --extract emails
+python intelhunterx.py search --db dbs/acme --selector example.com --extract credentials
+python intelhunterx.py search --db dbs/acme --selector example.com --extract surface
 ```
 
 `surface` extracts endpoints, hostnames, and assets.
@@ -118,7 +125,7 @@ python intelhunterx.py --api-key YOUR_INTELX_KEY --query example.com --selector 
 
 ```bash
 export INTELX_API_KEY="YOUR_INTELX_KEY"
-python intelhunterx.py --query example.com --selector example.com
+python intelhunterx.py download --db dbs/acme --query example.com
 ```
 
 ## Parsing and extraction
@@ -130,64 +137,59 @@ python intelhunterx.py --query example.com --selector example.com
 - Domain selectors match subdomains; keyword selectors match substrings; email selectors match the full email.
 - Use `--extract` to limit findings to `credentials`, `emails`, or `surface`.
 
-## Output structure
+## Database layout
 
-By default, the tool writes into `./results`:
+The database folder is a single directory tree. One query = one folder:
+
+If a query contains filesystem-unsafe characters, the folder name is a readable slug plus a short hash.
+Example: `*.example.com` becomes `_wildcard_.example.com__a1b2c3d4e5`. The exact query is stored in `query.json`.
 
 ```
-results/
-  example.com_YYYYMMDD_HHMMSS/
+dbs/
+  acme/
+    db.json
+    queries/
+      example.com/
+        query.json
+        segments/
+          seg01/
+            Info.csv
+            ...
+          seg02/
+            Info.csv
+            ...
     findings/
       assets.jsonl
       hostnames.jsonl
       emails.jsonl
       endpoints.jsonl
       credentials.jsonl
-    summary.json
-    run_metadata.json
-  findings/
-    assets.jsonl
-    hostnames.jsonl
-    emails.jsonl
-    endpoints.jsonl
-    credentials.jsonl
-  summary.json
-  run_metadata.json
-
-  intelx_exports/
-    example.com_YYYYMMDD_HHMMSS/
-      example.com_seg01.zip
-      example.com_seg01_extracted/
-        Info.csv
-        ...
+      summary.json
+      run_metadata.json
+    state/
+      searches/
+        <search_key>/
+          search.json
+          scanned.jsonl
 ```
 
 Each JSONL line includes the finding value and its source location, plus optional `context` and `source_meta`.
-The root `results/findings` folder contains the merged, deduplicated, alphabetically sorted outputs across all scanned domains.
+The `findings` folder contains the merged, deduplicated, alphabetically sorted outputs across all scanned queries in the database.
 
 ## Operational notes
 
 - Default configuration aims for maximum coverage:
-  - `--max-results` defaults to 1000 (ZIP cap).
-  - Adaptive segmentation is enabled by default.
-  - All lines are scanned by default; selectors are literal unless you pass keywords.
-  - `--max-segments 0` means unlimited segmentation until IntelX reports no more results.
-- Execution runs in two phases: download all exports first, then scan.
+  - `download --max-results` defaults to 1000 (ZIP cap).
+  - Adaptive segmentation is enabled by default during downloads.
+- `--max-segments 0` means unlimited segmentation until IntelX reports no more results.
+- `download` stores only extracted documents; ZIP files are removed after extraction.
+- `search` keeps memory per selector set + extract mode and only scans new files for those selectors.
+- Updating a query with `download --update` refreshes its content id so the new documents are scanned again.
 - IntelX export limits: 1000 files per ZIP, 2 GB uncompressed, 20 MB per file.
 - The tool rate limits requests to 1 req/s by default to match IntelX guidance.
 
 ## Exit codes
 
 - `0`: Success
-- `1`: Completed with one or more domain failures
+- `1`: Completed with one or more query failures
 - `2`: Invalid CLI usage or missing required flags
-
-## Screenshots
-
-### Console output
-
-![Console output](media/consoleoutput.png)
-
-### Results example
-
-![Results example](media/results.png)

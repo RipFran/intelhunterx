@@ -369,6 +369,9 @@ def plan_export_batches(
     segment_days: int,
     max_segments: int = DEFAULT_MAX_SEGMENTS,
     reuse_existing: bool = False,
+    name_pattern: Optional[str] = None,
+    include_domain_in_name: bool = True,
+    extract_suffix: str = "_extracted",
 ) -> List[ExportBatch]:
     if client is None:
         raise IntelXExportError("IntelX client is not initialized.")
@@ -409,10 +412,20 @@ def plan_export_batches(
             client.terminate(search_id)
             break
 
-        label_base = _window_label(date_to, segments_run + 1)
-        window_label = label_base if date_to is None else f"{label_base}_seg{segments_run + 1:02d}"
-        zip_path = download_dir / f"{sanitize_for_fs(domain)}_{window_label}.zip"
-        extract_dir = download_dir / f"{sanitize_for_fs(domain)}_{window_label}_extracted"
+        if name_pattern:
+            window_label = name_pattern.format(index=segments_run + 1)
+        else:
+            label_base = _window_label(date_to, segments_run + 1)
+            window_label = label_base if date_to is None else f"{label_base}_seg{segments_run + 1:02d}"
+
+        name_parts: List[str] = []
+        if include_domain_in_name:
+            name_parts.append(sanitize_for_fs(domain))
+        if window_label:
+            name_parts.append(window_label)
+        base_name = "_".join(name_parts) if name_parts else sanitize_for_fs(domain)
+        zip_path = download_dir / f"{base_name}.zip"
+        extract_dir = download_dir / f"{base_name}{extract_suffix}"
 
         try:
             if zip_path.exists() and reuse_existing:
