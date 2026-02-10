@@ -181,8 +181,10 @@ The `findings` folder contains the merged, deduplicated, alphabetically sorted o
 - Default configuration aims for maximum coverage:
   - `download --max-results` defaults to 1000 (ZIP cap).
   - Adaptive segmentation is enabled by default during downloads.
+- `download --segment-days N` limits exports to documents between "now" and N days back (UTC).
 - `--max-segments 0` means unlimited segmentation until IntelX reports no more results.
 - `download` stores only extracted documents; ZIP files are removed after extraction.
+- If you cancel `download` with Ctrl+C, the tool keeps already extracted segments and leaves the query in a resumable state.
 - `search` keeps memory per selector set + extract mode and only scans new files for those selectors.
 - Updating a query with `download --update` refreshes its content id so the new documents are scanned again.
 - IntelX export limits: 1000 files per ZIP, 2 GB uncompressed, 20 MB per file.

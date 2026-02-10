@@ -32,3 +32,6 @@ Thumbs.db
 
 # Exectution files
 selectors.txt
+
+# Test files
+tests/*
